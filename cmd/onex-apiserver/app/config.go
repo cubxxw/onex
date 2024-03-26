@@ -11,7 +11,7 @@ import (
 	"github.com/superproj/onex/internal/apiserver"
 )
 
-// NewConfig creates all the resources for running kube-apiserver, but runs none of them.
+// NewConfig creates all the resources for running onex-apiserver, but runs none of them.
 // onex-apiserver has no extension and aggregator apiserver, so return *apiserver.Config directly.
 // If you want to add extension and aggregator apiserver in the future, please refer to
 // https://github.com/kubernetes/kubernetes/blob/v1.28.2/cmd/kube-apiserver/app/config.go#L28.

@@ -21,6 +21,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/routes"
 
+	"github.com/superproj/onex/internal/apiserver/controller/systemnamespaces"
 	"github.com/superproj/onex/internal/apiserver/storage"
 	"github.com/superproj/onex/internal/pkg/config/minerprofile"
 	appsrest "github.com/superproj/onex/internal/registry/apps/rest"
@@ -29,7 +30,7 @@ import (
 	"github.com/superproj/onex/pkg/apis/apps/v1beta1"
 	coordinationv1 "github.com/superproj/onex/pkg/apis/coordination/v1"
 	apiv1 "github.com/superproj/onex/pkg/apis/core/v1"
-	clientset "github.com/superproj/onex/pkg/generated/clientset/versioned"
+	"github.com/superproj/onex/pkg/generated/clientset/versioned"
 	informers "github.com/superproj/onex/pkg/generated/informers/externalversions"
 )
 
@@ -101,7 +102,14 @@ func (c completedConfig) New() (*APIServer, error) {
 		GenericAPIServer: genericServer,
 	}
 
-	// install onex legacy rest storage
+	clientset, err := versioned.NewForConfig(c.GenericConfig.LoopbackClientConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	// Install onex legacy rest storage
+	// This part of the code is different from kube-apiserver because
+	// we do not need to install all kube-apiserver legacy APIs.
 	if err := s.InstallLegacyAPI(&c, c.GenericConfig.RESTOptionsGetter); err != nil {
 		return nil, err
 	}
@@ -121,6 +129,14 @@ func (c completedConfig) New() (*APIServer, error) {
 	if err := s.InstallAPIs(c.ExtraConfig.APIResourceConfigSource, c.GenericConfig.RESTOptionsGetter, restStorageProviders...); err != nil {
 		return nil, err
 	}
+
+	s.GenericAPIServer.AddPostStartHookOrDie("start-system-namespaces-controller", func(hookContext genericapiserver.PostStartHookContext) error {
+		go systemnamespaces.NewController(clientset, c.ExtraConfig.VersionedInformers.Core().V1().Namespaces()).Run(hookContext.StopCh)
+		return nil
+	})
+
+	// Here, I removed unused kube-apiserver post start hooks and
+	// add post start hooks which onex-apiserver needs
 
 	// TODO: copy from kube-apiserver
 	s.GenericAPIServer.AddPostStartHookOrDie(
@@ -144,7 +160,7 @@ func (c completedConfig) New() (*APIServer, error) {
 	s.GenericAPIServer.AddPostStartHookOrDie(
 		"initialize-instance-config-client",
 		func(ctx genericapiserver.PostStartHookContext) error {
-			client, err := clientset.NewForConfig(ctx.LoopbackClientConfig)
+			client, err := versioned.NewForConfig(ctx.LoopbackClientConfig)
 			if err != nil {
 				return err
 			}
@@ -166,15 +182,16 @@ func (c completedConfig) New() (*APIServer, error) {
 
 	if utilfeature.DefaultFeatureGate.Enabled(apiserverfeatures.APIServerIdentity) {
 		// put some post start hook here
+		// refer to: https://github.com/kubernetes/kubernetes/blob/v1.29.3/pkg/controlplane/instance.go#L515
 	}
 
 	return s, nil
 }
 
 // PrepareRun prepares the apiserver to run, by calling the generic PrepareRun.
-func (s *APIServer) PrepareRun() preparedAPIServer {
+func (s *APIServer) PrepareRun() (preparedAPIServer, error) {
 	prepared := s.GenericAPIServer.PrepareRun()
-	return preparedAPIServer{runnable: prepared}
+	return preparedAPIServer{runnable: prepared}, nil
 }
 
 func (s preparedAPIServer) Run(stopCh <-chan struct{}) error {
@@ -242,11 +259,11 @@ func (s *APIServer) InstallAPIs(
 		// This is a spot above the construction of individual storage handlers so that no sig accidentally forgets to check.
 		resourceExpirationEvaluator.RemoveDeletedKinds(groupName, apiGroupInfo.Scheme, apiGroupInfo.VersionedResourcesStorageMap)
 		if len(apiGroupInfo.VersionedResourcesStorageMap) == 0 {
-			klog.V(1).InfoS("Removing API group because it is time to stop serving it because it has no versions per APILifecycle.", "groupName", groupName)
+			klog.V(1).Infof("Removing API group %v because it is time to stop serving it because it has no versions per APILifecycle.", groupName)
 			continue
 		}
 
-		klog.V(1).InfoS("Enabling API group", "groupName", groupName)
+		klog.V(1).Infof("Enabling API group %q.", groupName)
 
 		if postHookProvider, ok := restStorageBuilder.(genericapiserver.PostStartHookProvider); ok {
 			name, hook, err := postHookProvider.PostStartHook()
@@ -257,8 +274,6 @@ func (s *APIServer) InstallAPIs(
 		}
 
 		if len(groupName) == 0 {
-			// In fact, the installation here is always empty because the LegacyAPIGroup has been installed
-			// in s.InstallLegacyAPI. This is to be consistent with the kube-apiserver code. (comment by Lingfei Kong)
 			// the legacy group for core APIs is special that it is installed into /api via this special install method.
 			if err := s.GenericAPIServer.InstallLegacyAPIGroup(genericapiserver.DefaultLegacyAPIPrefix, &apiGroupInfo); err != nil {
 				return fmt.Errorf("error in registering legacy API: %w", err)

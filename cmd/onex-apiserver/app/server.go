@@ -52,7 +52,7 @@ func init() {
 
 // NewAPIServerCommand creates a *cobra.Command object with default parameters.
 func NewAPIServerCommand() *cobra.Command {
-	opts := options.NewServerRunOptions()
+	s := options.NewServerRunOptions()
 	cmd := &cobra.Command{
 		Use:   "onex-apiserver",
 		Short: "Launch a onex API server",
@@ -75,13 +75,13 @@ onex's shared state through which all other components interact.`,
 
 			// Activate logging as soon as possible, after that
 			// show flags with the final logging configuration.
-			if err := logsapi.ValidateAndApply(opts.Logs, utilfeature.DefaultFeatureGate); err != nil {
+			if err := logsapi.ValidateAndApply(s.Logs, utilfeature.DefaultFeatureGate); err != nil {
 				return err
 			}
 			cliflag.PrintFlags(fs)
 
 			// set default options
-			completedOptions, err := opts.Complete()
+			completedOptions, err := s.Complete()
 			if err != nil {
 				return err
 			}
@@ -105,7 +105,7 @@ onex's shared state through which all other components interact.`,
 	}
 
 	fs := cmd.Flags()
-	namedFlagSets := opts.Flags()
+	namedFlagSets := s.Flags()
 	version.AddFlags(namedFlagSets.FlagSet("global"))
 	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
 	// The custom flag is actually not used. It is just a placeholder. In order to be consistent with
@@ -141,7 +141,12 @@ func Run(opts options.CompletedOptions, stopCh <-chan struct{}) error {
 		return err
 	}
 
-	return server.PrepareRun().Run(stopCh)
+	prepared, err := server.PrepareRun()
+	if err != nil {
+		return err
+	}
+
+	return prepared.Run(stopCh)
 }
 
 // CreateServerChain creates the apiservers connected via delegation.
@@ -156,7 +161,7 @@ func CreateServerChain(config apiserver.CompletedConfig) (*apiserver.APIServer, 
 
 // CreateOneXAPIServerConfig creates all the resources for running kube-apiserver, but runs none of them.
 func CreateOneXAPIServerConfig(opts options.CompletedOptions) (*apiserver.Config, error) {
-	genericConfig, versionedInformers, storageFactory, err := buildGenericConfig(opts)
+	genericConfig, versionedInformers, storageFactory, err := BuildGenericConfig(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -178,8 +183,8 @@ func CreateOneXAPIServerConfig(opts options.CompletedOptions) (*apiserver.Config
 	return config, nil
 }
 
-// buildGenericConfig takes the master server options and produces the genericapiserver.Config associated with it.
-func buildGenericConfig(s options.CompletedOptions) (
+// BuildGenericConfig takes the master server options and produces the genericapiserver.Config associated with it.
+func BuildGenericConfig(s options.CompletedOptions) (
 	genericConfig *genericapiserver.RecommendedConfig,
 	versionedInformers informers.SharedInformerFactory,
 	storageFactory *serverstorage.DefaultStorageFactory,
@@ -195,6 +200,23 @@ func buildGenericConfig(s options.CompletedOptions) (
 	if lastErr = s.RecommendedOptions.ApplyTo(genericConfig); lastErr != nil {
 		return
 	}
+
+	// Use protobufs for self-communication.
+	// Since not every generic apiserver has to support protobufs, we
+	// cannot default to it in generic apiserver and need to explicitly
+	// set it in onex-apiserver.
+	genericConfig.LoopbackClientConfig.ContentConfig.ContentType = "application/vnd.kubernetes.protobuf"
+	// Disable compression for self-communication, since we are going to be
+	// on a fast local network
+	genericConfig.LoopbackClientConfig.DisableCompression = true
+
+	onexClientConfig := genericConfig.LoopbackClientConfig
+	clientgoExternalClient, err := versioned.NewForConfig(onexClientConfig)
+	if err != nil {
+		lastErr = fmt.Errorf("failed to create real external clientset: %w", err)
+		return
+	}
+	versionedInformers = informers.NewSharedInformerFactory(clientgoExternalClient, 10*time.Minute)
 
 	if utilfeature.DefaultFeatureGate.Enabled(genericfeatures.APIServerTracing) {
 		if lastErr = s.Traces.ApplyTo(genericConfig.EgressSelector, &genericConfig.Config); lastErr != nil {
@@ -225,6 +247,7 @@ func buildGenericConfig(s options.CompletedOptions) (
 		s.RecommendedOptions.Etcd.StorageConfig.Transport.TracerProvider = oteltrace.NewNoopTracerProvider()
 	}
 
+	// TODO: Delete the following comments
 	/*
 		if lastErr = s.RecommendedOptions.Etcd.Complete(genericConfig.StorageObjectCountTracker, genericConfig.DrainedNotify(), genericConfig.AddPostStartHook); lastErr != nil {
 			return
@@ -240,23 +263,6 @@ func buildGenericConfig(s options.CompletedOptions) (
 	if lastErr = s.RecommendedOptions.Etcd.ApplyWithStorageFactoryTo(storageFactory, &genericConfig.Config); lastErr != nil {
 		return
 	}
-
-	// Use protobufs for self-communication.
-	// Since not every generic apiserver has to support protobufs, we
-	// cannot default to it in generic apiserver and need to explicitly
-	// set it in onex-apiserver.
-	genericConfig.LoopbackClientConfig.ContentConfig.ContentType = "application/vnd.kubernetes.protobuf"
-	// Disable compression for self-communication, since we are going to be
-	// on a fast local network
-	genericConfig.LoopbackClientConfig.DisableCompression = true
-
-	onexClientConfig := genericConfig.LoopbackClientConfig
-	clientgoExternalClient, err := versioned.NewForConfig(onexClientConfig)
-	if err != nil {
-		lastErr = fmt.Errorf("failed to create real external clientset: %w", err)
-		return
-	}
-	versionedInformers = informers.NewSharedInformerFactory(clientgoExternalClient, 10*time.Minute)
 
 	// TODO: Currently authentication and authorization rely on kubernetes cluster. Support in the future.
 	/*

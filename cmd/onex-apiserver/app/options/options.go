@@ -33,6 +33,7 @@ type ServerRunOptions struct {
 	// RecommendedOptions *genericoptions.RecommendedOptions
 	GenericServerRunOptions *genericoptions.ServerRunOptions
 	RecommendedOptions      *options.RecommendedOptions
+	Features                *genericoptions.FeatureOptions
 	Metrics                 *metrics.Options
 	Logs                    *logs.Options
 	Traces                  *genericoptions.TracingOptions
@@ -52,9 +53,10 @@ func NewServerRunOptions() *ServerRunOptions {
 			defaultEtcdPathPrefix,
 			legacyscheme.Codecs.LegacyCodec(v1beta1.SchemeGroupVersion),
 		),
-		Metrics: metrics.NewOptions(),
-		Logs:    logs.NewOptions(),
-		Traces:  genericoptions.NewTracingOptions(),
+		Features: genericoptions.NewFeatureOptions(),
+		Metrics:  metrics.NewOptions(),
+		Logs:     logs.NewOptions(),
+		Traces:   genericoptions.NewTracingOptions(),
 
 		EnableLogsHandler: true,
 		EventTTL:          1 * time.Hour,
@@ -81,12 +83,16 @@ func NewServerRunOptions() *ServerRunOptions {
 	RegisterAllAdmissionPlugins(o.RecommendedOptions.Admission.Plugins)
 	o.RecommendedOptions.Admission.RecommendedPluginOrder = AllOrderedPlugins
 	o.RecommendedOptions.Admission.DefaultOffPlugins = DefaultOffAdmissionPlugins()
+
+	// Overwrite the default for storage data format.
+	o.RecommendedOptions.Etcd.DefaultStorageMediaType = "application/vnd.kubernetes.protobuf"
 	return o
 }
 
 func (o ServerRunOptions) Flags() (fss cliflag.NamedFlagSets) {
 	o.GenericServerRunOptions.AddUniversalFlags(fss.FlagSet("generic"))
 	o.RecommendedOptions.AddFlags(fss.FlagSet("recommended"))
+	o.Features.AddFlags(fss.FlagSet("features"))
 	o.Metrics.AddFlags(fss.FlagSet("metrics"))
 	logsapi.AddFlags(o.Logs, fss.FlagSet("logs"))
 	o.Traces.AddFlags(fss.FlagSet("traces"))
